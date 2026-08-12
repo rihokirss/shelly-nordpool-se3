@@ -2,8 +2,10 @@ var CONFIG = {
   area: "SE3",
   api: "https://dataportal-api.nordpoolgroup.com/api/DayAheadPrices",
   kvsKey: "np_se3_plan_v1",
+  requestKey: "np_se3_req_v1",
   outputIds: [0, 1],
   monitorScriptId: 2,
+  fetcherScriptId: 3,
   numberIds: [250, 251],
   groupId: 250,
   defaultHours: [6, 3],
@@ -88,18 +90,6 @@ function channelHours(channel) {
   return channel < state.outputCount ? state.hours[channel] : 0;
 }
 
-function maskToHex(mask) {
-  var text = "";
-  for (var index = 0; index < mask.length; index += 4) {
-    var value = 0;
-    for (var bit = 0; bit < 4; bit++) {
-      if (index + bit < mask.length && mask[index + bit]) value += 1 << bit;
-    }
-    text += value.toString(16);
-  }
-  return text;
-}
-
 function bitIsOn(hex, index) {
   var value = parseInt(hex.charAt(Math.floor(index / 4)), 16);
   return (value & (1 << (index % 4))) !== 0;
@@ -109,52 +99,6 @@ function countHexBits(hex, length) {
   var count = 0;
   for (var index = 0; index < length; index++) if (bitIsOn(hex, index)) count++;
   return count;
-}
-
-function selectMask(prices, hours) {
-  var selected = [];
-  var index;
-
-  for (index = 0; index < prices.length; index++) {
-    selected.push(false);
-  }
-  var count = wantedCount(hours, prices.length);
-  for (var chosen = 0; chosen < count; chosen++) {
-    var best = -1;
-    for (index = 0; index < prices.length; index++) {
-      if (!selected[index] && (best < 0 || prices[index] < prices[best])) best = index;
-    }
-    selected[best] = true;
-  }
-  return maskToHex(selected);
-}
-
-function buildPlan(key, prices) {
-  var bounds = dayBounds(key);
-  var expected = Math.round((bounds[1] - bounds[0]) / 900000);
-  if (prices.length !== expected) throw new Error("Expected " + expected + " intervals, got " + prices.length);
-
-  var minimum = null;
-  var maximum = null;
-  for (var index = 0; index < prices.length; index++) {
-    if (!isNumber(prices[index])) throw new Error("Invalid price");
-    if (minimum === null || prices[index] < minimum) minimum = prices[index];
-    if (maximum === null || prices[index] > maximum) maximum = prices[index];
-  }
-
-  var plan = {
-    d: key,
-    n: prices.length,
-    a: selectMask(prices, channelHours(0)),
-    b: selectMask(prices, channelHours(1)),
-    x: wantedCount(channelHours(0), prices.length),
-    y: wantedCount(channelHours(1), prices.length)
-  };
-  var selectionText = "OUT0=" + plan.x;
-  if (state.outputCount > 1) selectionText += ", OUT1=" + plan.y;
-  log("Plan " + dateText(key) + ": " + plan.n + " intervals, " + selectionText +
-    ", prices=" + minimum + ".." + maximum + " EUR/MWh");
-  return plan;
 }
 
 function findPlan(key) {
@@ -211,7 +155,17 @@ function loadPlans(done) {
         log("Ignored invalid cache");
       }
     }
-    done();
+    Shelly.call("KVS.Get", { key: CONFIG.requestKey }, function (requestResult, requestError) {
+      if (requestError === 0 && requestResult) {
+        try {
+          var request = typeof requestResult.value === "string" ? JSON.parse(requestResult.value) : requestResult.value;
+          if (request && request.retry && request.retry > Date.now()) state.lastTry = Date.now();
+        } catch (error) {
+          log("Ignored invalid fetch request");
+        }
+      }
+      done();
+    });
   });
 }
 
@@ -259,110 +213,6 @@ function applyOutputs(refreshTimer) {
   setOutput(1, bitIsOn(plan.b, slot), refreshTimer);
 }
 
-function parsePrices(body, targetKey, buffer) {
-  var startLabel = "\"deliveryStart\":\"";
-  var endLabel = "\"deliveryEnd\":\"";
-  var areaLabel = "\"entryPerArea\":{";
-  var priceLabel = "\"" + CONFIG.area + "\":";
-  var position = 0;
-  var seen = 0;
-  var entriesEnd;
-  var bounds = dayBounds(targetKey);
-
-  if (typeof body !== "string" || body.indexOf("\"multiAreaEntries\"") < 0) throw new Error("Invalid response");
-  entriesEnd = body.indexOf("\"blockPriceAggregates\"");
-  if (entriesEnd < 0) entriesEnd = body.length;
-  while (true) {
-    var startAt = body.indexOf(startLabel, position);
-    if (startAt < 0 || startAt >= entriesEnd) break;
-    startAt += startLabel.length;
-    var startEnd = body.indexOf("\"", startAt);
-    var endAt = body.indexOf(endLabel, startEnd) + endLabel.length;
-    var endEnd = body.indexOf("\"", endAt);
-    var areaAt = body.indexOf(areaLabel, endEnd) + areaLabel.length;
-    var areaEnd = body.indexOf("}", areaAt);
-    if (startEnd < 0 || endAt < endLabel.length || endEnd < 0 || areaAt < areaLabel.length || areaEnd < 0) {
-      throw new Error("Invalid delivery entry");
-    }
-
-    var start = new Date(body.substring(startAt, startEnd)).getTime();
-    var end = new Date(body.substring(endAt, endEnd)).getTime();
-    if (!isNumber(start) || !isNumber(end) || end - start !== 900000) throw new Error("Invalid interval time");
-
-    if (dateKey(new Date(start)) === targetKey) {
-      if (start !== bounds[0] + buffer.count * 900000) throw new Error("Missing or duplicate interval");
-      var priceAt = body.indexOf(priceLabel, areaAt);
-      if (priceAt < 0 || priceAt >= areaEnd) throw new Error("Missing SE3 price");
-      priceAt += priceLabel.length;
-      var priceEnd = priceAt;
-      while (priceEnd < areaEnd && ",}".indexOf(body.charAt(priceEnd)) < 0) priceEnd++;
-      var price = Number(body.substring(priceAt, priceEnd));
-      if (!isNumber(price)) throw new Error("Invalid SE3 price");
-      buffer.text += price + ",";
-      buffer.count++;
-    }
-    seen++;
-    position = areaEnd + 1;
-  }
-  if (seen === 0) throw new Error("No delivery entries");
-}
-
-function marketUrl(key) {
-  return CONFIG.api + "?currency=EUR&market=DayAhead&deliveryArea=" + CONFIG.area + "&date=" + dateText(key);
-}
-
-function fetchMarketDate(marketDate, targetKey, buffer, done) {
-  log("Fetching SE3 market date " + dateText(marketDate));
-  Shelly.call("HTTP.GET", { url: marketUrl(marketDate), timeout: 30 }, function (result, errorCode, errorMessage) {
-    try {
-      if (errorCode !== 0 || !result || result.code !== 200) throw new Error("HTTP " + errorCode + " " + errorMessage);
-      parsePrices(result.body, targetKey, buffer);
-      result = null;
-      done(true, null);
-    } catch (error) {
-      done(false, error.message || "Price parse failed");
-    }
-  });
-}
-
-function fetchLocalDay(targetKey) {
-  if (state.busy) return;
-  state.busy = true;
-  state.lastTry = Date.now();
-  var buffer = { text: "", count: 0 };
-
-  fetchMarketDate(addDay(targetKey, -1), targetKey, buffer, function (firstOk, firstError) {
-    if (!firstOk) return fetchFailed(targetKey, firstError);
-    Timer.set(5000, false, function () {
-      fetchMarketDate(targetKey, targetKey, buffer, function (secondOk, secondError) {
-        if (!secondOk) return fetchFailed(targetKey, secondError);
-        Timer.set(1, false, function () {
-          try {
-            var prices = JSON.parse("[" + buffer.text.substring(0, buffer.text.length - 1) + "]");
-            replacePlan(buildPlan(targetKey, prices));
-            prices = null;
-            buffer = null;
-            state.busy = false;
-            state.lastTry = 0;
-            savePlans();
-            applyOutputs(true);
-            requestPrices(false);
-          } catch (error) {
-            fetchFailed(targetKey, error.message || "Plan failed");
-          }
-        });
-      });
-    });
-  });
-}
-
-function fetchFailed(targetKey, message) {
-  state.busy = false;
-  log("Fetch " + dateText(targetKey) + " failed: " + message + "; retry in 5 min");
-  applyOutputs(false);
-  startMonitor();
-}
-
 function missingPlanDate() {
   if (!deviceHasTime()) return null;
   var today = dateKey(new Date());
@@ -374,6 +224,41 @@ function missingPlanDate() {
   return null;
 }
 
+function outputsAreOff() {
+  for (var channel = 0; channel < state.outputCount; channel++) {
+    var status = Shelly.getComponentStatus("switch", CONFIG.outputIds[channel]);
+    if (status && status.output) return false;
+  }
+  return true;
+}
+
+function stopForFetcher() {
+  Shelly.call("Script.Stop", { id: Script.id });
+}
+
+function fetcherStarted(result, errorCode, errorMessage) {
+  if (errorCode !== 0) {
+    state.busy = false;
+    log("Could not start price fetcher: " + errorMessage);
+    startMonitor();
+    return;
+  }
+  Timer.set(1500, false, stopForFetcher);
+}
+
+function monitorStoppedForFetch() {
+  Shelly.call("Script.Start", { id: CONFIG.fetcherScriptId }, fetcherStarted);
+}
+
+function fetchRequestSaved(result, errorCode, errorMessage) {
+  if (errorCode !== 0) {
+    state.busy = false;
+    log("Could not save fetch request: " + errorMessage);
+    return;
+  }
+  Shelly.call("Script.Stop", { id: CONFIG.monitorScriptId }, monitorStoppedForFetch);
+}
+
 function requestPrices(force) {
   if (!state.ready || state.busy) return;
   var target = missingPlanDate();
@@ -381,19 +266,24 @@ function requestPrices(force) {
     startMonitor();
     return;
   }
-  if (!force && state.lastTry && Date.now() - state.lastTry < CONFIG.retryMs) return;
-  var monitor = Shelly.getComponentStatus("script", CONFIG.monitorScriptId);
-  if (!monitor || !monitor.running) {
-    fetchLocalDay(target);
+  if (!force && state.lastTry && Date.now() - state.lastTry < CONFIG.retryMs) {
+    startMonitor();
+    return;
+  }
+  if (!outputsAreOff()) {
+    applyOutputs(false);
+    startMonitor();
     return;
   }
   state.busy = true;
-  Shelly.call("Script.Stop", { id: CONFIG.monitorScriptId }, function () {
-    Timer.set(1000, false, function () {
-      state.busy = false;
-      fetchLocalDay(target);
-    });
-  });
+  state.lastTry = Date.now();
+  var request = {
+    d: target,
+    h: [channelHours(0), channelHours(1)],
+    c: state.outputCount,
+    retry: 0
+  };
+  Shelly.call("KVS.Set", { key: CONFIG.requestKey, value: JSON.stringify(request) }, fetchRequestSaved);
 }
 
 function startMonitor() {
@@ -533,7 +423,7 @@ function startController() {
   applyOutputs(true);
   scheduleBoundary();
   Timer.set(60000, true, maintenance);
-  requestPrices(true);
+  requestPrices(false);
   log("Controller started" + (CONFIG.dryRun ? " in DRY RUN mode" : ""));
 }
 

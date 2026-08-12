@@ -159,16 +159,14 @@ test("current slot indexing follows elapsed absolute quarters across the local d
   assert.equal(controller.currentSlotIndex(plan, bounds.end), -1);
 });
 
-test("readable production runtime boots, fetches two responses and stores a 24/12 plan", () => {
-  const currentKey = controller.localDateKey(new Date());
-  const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
+test("readable controller delegates a missing plan to the price fetcher", () => {
   const logs = [];
   const kvsWrites = [];
   const monitorCalls = [];
-  let httpCalls = 0;
   let monitorRunning = true;
 
   const context = {
+    Script: { id: 1 },
     print: (line) => logs.push(line),
     Timer: {
       set: (delay, repeat, callback) => {
@@ -203,16 +201,12 @@ test("readable production runtime boots, fetches two responses and stores a 24/1
           kvsWrites.push(params.value);
           callback({}, 0, "");
         } else if (method === "Script.Stop") {
-          monitorRunning = false;
-          monitorCalls.push(method);
-          callback({}, 0, "");
+          monitorCalls.push(`${method}:${params.id}`);
+          if (callback) callback({}, 0, "");
         } else if (method === "Script.Start") {
           monitorRunning = true;
-          monitorCalls.push(method);
+          monitorCalls.push(`${method}:${params.id}`);
           if (callback) callback({}, 0, "");
-        } else if (method === "HTTP.GET") {
-          const part = httpCalls++ === 0 ? localSlots.slice(0, 4) : localSlots.slice(4);
-          callback({ code: 200, body: responseBody(part) }, 0, "");
         } else {
           throw new Error(`Unexpected Shelly call: ${method}`);
         }
@@ -223,26 +217,65 @@ test("readable production runtime boots, fetches two responses and stores a 24/1
   const runtimePath = path.join(__dirname, "..", "shelly-nordpool-se3.js");
   vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
 
-  assert.equal(httpCalls, 2);
-  assert.equal(context.state.plans.length, 1);
-  assert.equal(context.state.plans[0].n, localSlots.length);
-  assert.equal(context.state.plans[0].x, 24);
-  assert.equal(context.state.plans[0].y, 12);
   assert.equal(kvsWrites.length, 1);
-  assert.deepEqual(monitorCalls, ["Script.Stop", "Script.Start"]);
-  assert.match(logs.join("\n"), /Plan .*OUT0=24, OUT1=12/);
+  assert.deepEqual(JSON.parse(kvsWrites[0]).h, [6, 3]);
+  assert.deepEqual(monitorCalls, ["Script.Stop:2", "Script.Start:3", "Script.Stop:1"]);
+  assert.equal(context.state.busy, true);
+});
+
+test("controller restarts the watchdog while a failed fetch waits for retry", () => {
+  const scriptStarts = [];
+  const retry = JSON.stringify({ d: controller.localDateKey(new Date()), h: [6, 3], c: 2, retry: Date.now() + 300000 });
+  const context = {
+    Script: { id: 1 },
+    print: () => undefined,
+    Timer: { set: () => 1, clear: () => undefined },
+    Shelly: {
+      getDeviceInfo: () => ({ app: "S2PMG3", ver: "2.0.0" }),
+      getComponentStatus: (type, id) => {
+        if (type === "sys") return { unixtime: Math.floor(Date.now() / 1000) };
+        if (type === "switch") return { output: false };
+        if (type === "number") return { value: id === 250 ? 6 : 3 };
+        if (type === "script" && id === 2) return { running: false };
+        return null;
+      },
+      call: (method, params, callback) => {
+        if (method === "Shelly.GetComponents") {
+          callback({ components: [
+            { key: "group:250", config: { name: "Nord Pool SE3" } },
+            { key: "number:250", config: { name: "OUT0 cheap hours" } },
+            { key: "number:251", config: { name: "OUT1 cheap hours" } }
+          ] }, 0, "");
+        } else if (method === "Group.Set" || method === "Switch.Set") {
+          callback({}, 0, "");
+        } else if (method === "KVS.Get") {
+          callback(params.key === "np_se3_req_v1" ? { value: retry } : null,
+            params.key === "np_se3_req_v1" ? 0 : 1, "Not found");
+        } else if (method === "Script.Start") {
+          scriptStarts.push(params.id);
+          if (callback) callback({}, 0, "");
+        } else {
+          throw new Error(`Unexpected Shelly call: ${method}`);
+        }
+      }
+    }
+  };
+
+  const runtimePath = path.join(__dirname, "..", "shelly-nordpool-se3.js");
+  vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
+  assert.deepEqual(scriptStarts, [2]);
+  assert.equal(context.state.busy, false);
 });
 
 test("production runtime detects a one-output Shelly and omits OUT1 controls", () => {
-  const currentKey = controller.localDateKey(new Date());
-  const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
   const logs = [];
   const virtualAdds = [];
   const groupCalls = [];
   const switchCalls = [];
-  let httpCalls = 0;
+  const kvsWrites = [];
 
   const context = {
+    Script: { id: 1 },
     print: (line) => logs.push(line),
     Timer: {
       set: (delay, repeat, callback) => {
@@ -271,10 +304,10 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
         } else if (method === "KVS.Get") {
           callback(null, 1, "Not found");
         } else if (method === "KVS.Set") {
+          kvsWrites.push(params.value);
           callback({}, 0, "");
-        } else if (method === "HTTP.GET") {
-          const part = httpCalls++ === 0 ? localSlots.slice(0, 4) : localSlots.slice(4);
-          callback({ code: 200, body: responseBody(part) }, 0, "");
+        } else if (method === "Script.Start" || method === "Script.Stop") {
+          if (callback) callback({}, 0, "");
         } else if (method === "Switch.Set") {
           switchCalls.push(params);
           callback({}, 0, "");
@@ -289,8 +322,7 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
   vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
 
   assert.equal(context.state.outputCount, 1);
-  assert.equal(context.state.plans[0].x, 24);
-  assert.equal(context.state.plans[0].y, 0);
+  assert.deepEqual(JSON.parse(kvsWrites[0]).h, [6, 0]);
   assert.deepEqual(virtualAdds.filter((item) => item.type === "number").map((item) => item.id), [250]);
   assert.deepEqual(Array.from(groupCalls[0].value), ["number:250"]);
   assert.ok(switchCalls.every((item) => item.id === 0));
@@ -301,8 +333,63 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
 test("production runtime avoids mJS methods missing from Shelly firmware 2.0", () => {
   const runtimePath = path.join(__dirname, "..", "shelly-nordpool-se3.js");
   const runtime = fs.readFileSync(runtimePath, "utf8");
+  const fetcher = fs.readFileSync(path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js"), "utf8");
   assert.doesNotMatch(runtime, /\.setDate\s*\(/);
   assert.doesNotMatch(runtime, /\.sort\s*\(/);
+  assert.doesNotMatch(fetcher, /\.setDate\s*\(/);
+  assert.doesNotMatch(fetcher, /\.sort\s*\(/);
+});
+
+test("minimal fetcher downloads two market dates and stores a 24/12 plan", () => {
+  const currentKey = controller.localDateKey(new Date());
+  const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
+  const request = JSON.stringify({ d: currentKey, h: [6, 3], c: 2, retry: 0 });
+  const writes = [];
+  const scriptCalls = [];
+  let httpCalls = 0;
+
+  const context = {
+    Script: { id: 3 },
+    print: () => undefined,
+    Timer: {
+      set: (delay, repeat, callback) => {
+        if (!repeat) callback();
+        return 1;
+      }
+    },
+    Shelly: {
+      call: (method, params, callback) => {
+        if (method === "KVS.Get" && params.key === "np_se3_req_v1") {
+          callback({ value: request }, 0, "");
+        } else if (method === "KVS.Get" && params.key === "np_se3_plan_v1") {
+          callback(null, 1, "Not found");
+        } else if (method === "HTTP.GET") {
+          const part = httpCalls++ === 0 ? localSlots.slice(0, 4) : localSlots.slice(4);
+          callback({ code: 200, body: responseBody(part) }, 0, "");
+        } else if (method === "KVS.Set") {
+          writes.push(params);
+          callback({}, 0, "");
+        } else if (method === "KVS.Delete") {
+          callback({}, 0, "");
+        } else if (method === "Script.Start" || method === "Script.Stop") {
+          scriptCalls.push(`${method}:${params.id}`);
+          if (callback) callback({}, 0, "");
+        } else {
+          throw new Error(`Unexpected fetcher call: ${method}`);
+        }
+      }
+    }
+  };
+
+  const fetcherPath = path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js");
+  vm.runInNewContext(fs.readFileSync(fetcherPath, "utf8"), context, { filename: fetcherPath });
+
+  assert.equal(httpCalls, 2);
+  const stored = JSON.parse(writes.find((item) => item.key === "np_se3_plan_v1").value);
+  assert.equal(stored.p[0].n, localSlots.length);
+  assert.equal(stored.p[0].x, 24);
+  assert.equal(stored.p[0].y, 12);
+  assert.deepEqual(scriptCalls, ["Script.Start:1", "Script.Stop:3"]);
 });
 
 test("monitor displays elapsed schedule and forces outputs off when controller stops", () => {
@@ -346,7 +433,8 @@ test("monitor displays elapsed schedule and forces outputs off when controller s
         } else if (method === "Group.Set") {
           groupCalls.push(params);
         } else if (method === "KVS.Get") {
-          callback({ value: JSON.stringify({ v: 1, p: [plan] }) }, 0, "");
+          if (params.key === "np_se3_plan_v1") callback({ value: JSON.stringify({ v: 1, p: [plan] }) }, 0, "");
+          else callback(null, 1, "Not found");
         } else if (method === "Switch.Set") {
           switchCalls.push(params);
         } else {
@@ -419,7 +507,8 @@ test("monitor detects one output and omits OUT1 from the group and status", () =
         } else if (method === "Group.Set") {
           groupCalls.push(params);
         } else if (method === "KVS.Get") {
-          callback({ value: JSON.stringify({ v: 1, p: [plan] }) }, 0, "");
+          if (params.key === "np_se3_plan_v1") callback({ value: JSON.stringify({ v: 1, p: [plan] }) }, 0, "");
+          else callback(null, 1, "Not found");
         } else if (method === "Switch.Set") {
           switchCalls.push(params);
         } else {

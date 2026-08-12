@@ -1,4 +1,4 @@
-# Nord Pool SE3 quarter-hour controller for Shelly Gen3
+# Nord Pool SE3 quarter-hour controller for Shelly Gen3 and Gen4
 
 New to Shelly scripts? Start with the step-by-step [`INSTALL.md`](INSTALL.md) guide. It explains exactly what to click and what a successful installation looks like.
 
@@ -14,7 +14,7 @@ The selected periods do not need to be consecutive.
 
 ## Requirements
 
-- A Shelly Gen3 device with one or two switch outputs, tested with Shelly 2PM Gen3 firmware 2.0.0
+- A Shelly Gen3 or Gen4 device with one or two switch outputs; fully tested on Shelly 2PM Gen3 firmware 2.0.0
 - Working internet and time synchronization on the Shelly
 - Device timezone following Aland/Finnish local time, such as `Europe/Helsinki`, `Europe/Mariehamn` or another zone with the same UTC offset and DST rules
 - Access to the device web interface
@@ -41,11 +41,13 @@ No Shelly Schedule jobs are created. The script applies output states at quarter
 2. Open **Scripts** and select **Create script**.
 3. Name it `NordPool SE3`.
 4. Copy the complete contents of `shelly-nordpool-se3.js` into the editor.
-5. Save and start the script.
+5. Save the script, but do not start it yet.
 6. Enable script auto-start.
-7. Create a second script named `NordPool SE3 monitor`, copy in `shelly-nordpool-se3-monitor.js`, save it and start it once. Leave its own auto-start disabled; the controller starts and stops it automatically to reserve memory during price downloads.
+7. Create script 2 named `NordPool SE3 monitor`, copy in `shelly-nordpool-se3-monitor.js`, save it and leave auto-start disabled.
+8. Create script 3 named `NordPool SE3 fetcher`, copy in `shelly-nordpool-se3-fetcher.js`, save it and leave auto-start disabled.
+9. Start only the controller. It starts the monitor and invokes the fetcher when needed.
 
-The default configuration expects the controller to be script ID 1 and the monitor to be script ID 2, which is what a clean device assigns when they are created in this order. If the assigned IDs differ, update `monitorScriptId` in the controller and `controllerScriptId` in the monitor before starting them.
+The default configuration expects controller ID 1, monitor ID 2 and fetcher ID 3. If the assigned IDs differ, update `monitorScriptId`, `fetcherScriptId` and `controllerScriptId` in the relevant `CONFIG` objects before starting them.
 
 The script creates these virtual components only when their IDs are free:
 
@@ -58,13 +60,13 @@ The script creates these virtual components only when their IDs are free:
 
 If one of those IDs is already occupied by an unrelated component, startup stops safely and the existing component is not modified.
 
-The group and settings for the detected outputs appear as soon as the controller starts. **Run today**, **Now** and **Next** appear after the monitor has been installed and started once. A one-output device does not create or display an OUT1 setting and never sends an OUT1 relay command.
+The group and settings for the detected outputs appear as soon as the controller starts. The controller starts the monitor automatically, which then adds **Run today**, **Now** and **Next**. A one-output device does not create or display an OUT1 setting and never sends an OUT1 relay command.
 
 `shelly-nordpool-se3.js` is the readable production runtime used on the device. An extended source with Node-test exports is kept in `src/shelly-nordpool-se3.source.js` for regression testing of the date, selection and KVS algorithms.
 
-`shelly-nordpool-se3-monitor.js` is a small readable companion script. It creates `text:250` through `text:252` only when each ID is free, never overwrites an unrelated component, and adds the valid fields to the **Nord Pool SE3** group. The fields separately show completed scheduled hours, planned versus actual relay state, and each output's next planned change. Completed scheduled hours are derived from the price plan; they are not a metered guarantee that a connected load consumed power for exactly that duration.
+`shelly-nordpool-se3-monitor.js` creates the three status fields and provides the fail-safe watchdog. `shelly-nordpool-se3-fetcher.js` is a minimal HTTP runtime that downloads and validates prices, writes the compact plan and then stops itself.
 
-Both scripts share the Shelly mJS memory pool. The controller therefore stops the monitor immediately before a Nord Pool HTTP download and starts it again after either a successful plan or a failed attempt. Relay control and the 16-minute hardware fallback remain active while the monitor is briefly stopped.
+Shelly scripts share a roughly 25 kB mJS memory pool even when the device has substantially more system RAM. Before a download, the controller waits until outputs are OFF, stops the monitor, starts the minimal fetcher and stops itself. The fetcher saves either a plan or a five-minute retry time, restarts the controller and stops itself. This prevents the 11 kB Nord Pool response from sharing the script pool with the larger controller and monitor runtimes.
 
 ## Configuration
 
@@ -119,10 +121,12 @@ The watchdog and `toggle_after` cover different failures. The watchdog handles a
 
 ## Monitoring
 
-Open the script console and look for messages prefixed with:
+Open the script consoles and look for messages prefixed with:
 
 ```text
 [NordPool SE3]
+[NordPool monitor]
+[NordPool fetcher]
 ```
 
 A successful plan message includes:
@@ -146,7 +150,7 @@ With the default settings, a normal plan reports OUT0=24. On a two-output device
 
 While the controller is running, it owns all detected output states. A manual or physical-input change can be corrected by the next one-minute health check or quarter-hour boundary.
 
-To take lasting manual control, stop the monitor first and then stop the controller. If only the controller is stopped, the watchdog intentionally forces every detected output off. An output that was previously turned on by the controller can still have its 16-minute safety timer active; explicitly turn the output off or set the desired manual state after stopping both scripts.
+To take lasting manual control, wait until the fetcher is stopped, then stop the monitor first and the controller second. If only the controller is stopped, the watchdog intentionally forces every detected output off. An output that was previously turned on by the controller can still have its 16-minute safety timer active; explicitly turn the output off or set the desired manual state after stopping both running scripts.
 
 ## Dry-run testing
 
@@ -156,7 +160,7 @@ For a test that fetches and calculates prices without changing outputs, temporar
 dryRun: true
 ```
 
-in the `CONFIG` object before uploading. The console will show price fetches and the calculated plan, while relay commands are suppressed. Restore `dryRun: false`, save and restart for production use.
+in the controller's `CONFIG` object before uploading. Relay commands are then suppressed. Price-download messages appear in the fetcher console and plan/application messages appear in the controller console. Restore `dryRun: false`, save and restart for production use.
 
 Local logic tests can be run with Node.js:
 
@@ -190,11 +194,11 @@ Another component already uses `group:250`, `number:250`, `number:251` or one of
 
 ## Removal and rollback
 
-1. Stop and delete the `NordPool SE3 monitor` script, then delete only its `text:250`, `text:251` and `text:252` components if they are no longer needed.
+1. Stop and delete the `NordPool SE3 fetcher` and `NordPool SE3 monitor` scripts, then delete only `text:250`, `text:251` and `text:252` if no longer needed.
 2. Stop the `NordPool SE3` controller script.
 3. Turn every available output off.
 4. Delete the controller script.
-5. Delete only the KVS key `np_se3_plan_v1`.
+5. Delete only the KVS keys `np_se3_plan_v1` and `np_se3_req_v1`.
 6. If they are no longer needed, delete `group:250`, `number:250` and, when it exists, `number:251` from Components.
 
 Do not bulk-delete KVS entries or virtual components; other automations may use them.

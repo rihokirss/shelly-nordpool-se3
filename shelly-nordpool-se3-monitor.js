@@ -29,10 +29,8 @@ function dateKey(date) {
 
 function dayBounds(key) {
   var start = new Date(
-    Number(key.substring(0, 4)),
-    Number(key.substring(4, 6)) - 1,
-    Number(key.substring(6, 8)),
-    0, 0, 0, 0
+    Number(key.substring(0, 4)), Number(key.substring(4, 6)) - 1,
+    Number(key.substring(6, 8)), 0, 0, 0, 0
   );
   var end = new Date(
     start.getFullYear(), start.getMonth(), start.getDate() + 1,
@@ -117,7 +115,6 @@ function displayPlan(plan, bounds) {
   var completed = slot;
   if (completed < 0) completed = 0;
   if (completed > plan.n) completed = plan.n;
-
   var output0 = Shelly.getComponentStatus("switch", CONFIG.outputIds[0]);
   var actual0 = output0 && output0.output ? "ON" : "OFF";
   var planned0 = slot >= 0 && slot < plan.n && bitIsOn(plan.a, slot) ? "ON" : "OFF";
@@ -125,10 +122,8 @@ function displayPlan(plan, bounds) {
     var output1 = Shelly.getComponentStatus("switch", CONFIG.outputIds[1]);
     var actual1 = output1 && output1.output ? "ON" : "OFF";
     var planned1 = slot >= 0 && slot < plan.n && bitIsOn(plan.b, slot) ? "ON" : "OFF";
-    show(0,
-      "OUT0 " + elapsedHours(plan.a, completed) + "/" + plan.x / 4 + " h, " +
-      "OUT1 " + elapsedHours(plan.b, completed) + "/" + plan.y / 4 + " h"
-    );
+    show(0, "OUT0 " + elapsedHours(plan.a, completed) + "/" + plan.x / 4 + " h, " +
+      "OUT1 " + elapsedHours(plan.b, completed) + "/" + plan.y / 4 + " h");
     show(1, "Planned OUT0 " + planned0 + ", OUT1 " + planned1 +
       " | actual OUT0 " + actual0 + ", OUT1 " + actual1);
     show(2, "OUT0 " + nextChange(plan.a, plan, slot, bounds[0]) +
@@ -145,7 +140,6 @@ function refresh() {
     forceOutputsOff("controller script is stopped");
     return;
   }
-
   Shelly.call("KVS.Get", { key: CONFIG.kvsKey }, function (result, errorCode) {
     if (errorCode !== 0 || !result) {
       show(0, "No cached plan for today");
@@ -202,8 +196,6 @@ function startMonitor() {
     if (event.delta.running === false) {
       forceOutputsOff("controller stopped");
     } else if (event.delta.running === true) {
-      // Let the controller finish its own component setup and first
-      // Switch.Set calls before restoring the full group and reading relays.
       Timer.set(1000, false, function () {
         setGroup();
         refresh();
@@ -231,24 +223,14 @@ function createStatusComponent(field) {
   var id = CONFIG.statusIds[field];
   Shelly.call("Text.GetConfig", { id: id }, function (result, errorCode) {
     if (errorCode === 0 && result) {
-      if (result.name !== CONFIG.statusNames[field]) {
-        log("Component conflict at text:" + id + "; field disabled");
-      } else {
-        statusReady[field] = true;
-      }
+      if (result.name !== CONFIG.statusNames[field]) log("Component conflict at text:" + id + "; field disabled");
+      else statusReady[field] = true;
       createStatusComponent(field + 1);
       return;
     }
-    Shelly.call("Virtual.Add", {
-      type: "text",
-      id: id,
-      config: config
-    }, function (addResult, addError, addMessage) {
-      if (addError !== 0) {
-        log("text:" + id + " creation failed: " + addMessage);
-      } else {
-        statusReady[field] = true;
-      }
+    Shelly.call("Virtual.Add", { type: "text", id: id, config: config }, function (addResult, addError, addMessage) {
+      if (addError !== 0) log("text:" + id + " creation failed: " + addMessage);
+      else statusReady[field] = true;
       createStatusComponent(field + 1);
     });
   });

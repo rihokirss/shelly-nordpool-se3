@@ -1,18 +1,18 @@
 # Easy installation guide
 
-This guide installs the Nord Pool SE3 controller on a clean one- or two-output Shelly Gen3. You do not need programming experience. The first script detects and controls the available outputs. The second script adds the status fields and safety watchdog.
+This guide installs the Nord Pool SE3 controller on a clean one- or two-output Shelly Gen3 or Gen4. You do not need programming experience. Three readable scripts are used: the controller, the status/watchdog monitor and a small price fetcher.
 
 ## Before you start
 
 You need:
 
-- a one- or two-output Shelly Gen3 connected to Wi-Fi and the internet;
+- a one- or two-output Shelly Gen3 or Gen4 connected to Wi-Fi and the internet;
 - its local web address, for example `http://192.168.1.100`;
 - current Shelly firmware;
 - the Shelly timezone set to Finnish/Aland time, for example `Europe/Helsinki`;
 - no load connected while doing the first test.
 
-The clean installation below expects the controller to become script 1 and the monitor to become script 2. Create them in exactly this order.
+The clean installation expects the controller to become script 1, the monitor script 2 and the fetcher script 3. Create them in exactly this order. Do not start the controller until all three have been saved.
 
 ## 1. Install the controller
 
@@ -25,27 +25,11 @@ The clean installation below expects the controller to become script 1 and the m
 7. Paste the copied text into the empty Shelly script editor. Replace any example text already in the editor.
 8. Select **Save**.
 9. Enable the script's **Run on startup** or **Auto start** option.
-10. Select **Start**.
+10. Save it, but do not select **Start** yet.
 
-Wait up to one minute. Do not create the second script until the first one has been saved as script 1.
+Do not start it yet. Create the next two scripts first.
 
-## 2. Check the controller
-
-1. Open **Components** in the Shelly menu.
-2. Look for the **Nord Pool SE3** group.
-3. Confirm that the group contains **OUT0 cheap hours**, initially `6`.
-4. On a two-output device, also confirm that it contains **OUT1 cheap hours**, initially `3`. A one-output device intentionally does not show OUT1.
-5. Return to **Scripts**, open `NordPool SE3` and check its console.
-
-A successful first download contains a line similar to:
-
-```text
-[NordPool SE3] Plan 2026-08-08: 96 intervals, OUT0=24, OUT1=12, prices=... EUR/MWh
-```
-
-The date and prices will be different. A one-output device shows only `OUT0=24`. A normal day has 96 intervals. Daylight-saving transition days can have 92 or 100.
-
-## 3. Install the status monitor
+## 2. Install the status monitor
 
 1. Return to **Scripts** and select **Create script** again.
 2. Enter the name `NordPool SE3 monitor`.
@@ -53,11 +37,37 @@ The date and prices will be different. A one-output device shows only `OUT0=24`.
 4. Select **Raw**, select all the text and copy it.
 5. Paste the copied text into the Shelly editor and select **Save**.
 6. Leave this script's own **Run on startup** or **Auto start** option disabled.
-7. Select **Start** once.
+7. Do not start it manually.
 
-The controller will start and stop the monitor automatically. Its own auto-start must stay disabled because both scripts share a small memory pool during Nord Pool downloads.
+## 3. Install the price fetcher
 
-## 4. Check the complete installation
+1. Select **Create script** once more.
+2. Enter the name `NordPool SE3 fetcher`.
+3. In GitHub, open [`shelly-nordpool-se3-fetcher.js`](shelly-nordpool-se3-fetcher.js).
+4. Select **Raw**, select all the text and copy it.
+5. Paste it into the Shelly editor and select **Save**.
+6. Leave its **Run on startup** or **Auto start** option disabled.
+7. Do not start it manually.
+
+The fetcher is intentionally separate because Shelly gives scripts a small shared JavaScript memory pool even on Gen4 devices. The controller starts the fetcher only while downloading prices and the fetcher stops itself afterwards.
+
+## 4. Start and check the controller
+
+1. Open the `NordPool SE3` controller script.
+2. Select **Start**.
+3. Wait up to one minute for the first price download.
+
+Then open **Components**, look for the **Nord Pool SE3** group and confirm that it contains **OUT0 cheap hours**, initially `6`. On a two-output device it also contains **OUT1 cheap hours**, initially `3`.
+
+A successful first download appears in the fetcher console as a line similar to:
+
+```text
+[NordPool fetcher] Plan 2026-08-08 saved: 96 intervals, OUT0=24, OUT1=12, prices=... EUR/MWh
+```
+
+The date and price range will be different. A one-output device shows only `OUT0=24`. A local day contains 92, 96 or 100 intervals depending on daylight saving time.
+
+## 5. Check the complete installation
 
 Open **Components -> Nord Pool SE3**. A two-output device contains five items; a one-output device contains four because OUT1 is omitted:
 
@@ -70,11 +80,12 @@ Open **Components -> Nord Pool SE3**. A two-output device contains five items; a
 Open **Scripts** and confirm:
 
 - `NordPool SE3` is running and auto-start is enabled;
-- `NordPool SE3 monitor` is running and its own auto-start is disabled.
+- `NordPool SE3 monitor` is running and its own auto-start is disabled;
+- `NordPool SE3 fetcher` is normally stopped and its own auto-start is disabled.
 
-It is normal for the monitor to stop briefly while prices are downloaded.
+It is normal for the controller and monitor to stop briefly while the fetcher downloads prices. They start again automatically.
 
-## 5. Choose the daily run time
+## 6. Choose the daily run time
 
 Open **Components -> Nord Pool SE3** and change either hour setting.
 
@@ -93,7 +104,7 @@ Open the controller console and look for an error. Check that the device has int
 
 ### Run today, Now and Next do not appear
 
-Confirm that the monitor was created second as script 2, saved and started once. Its own auto-start should remain disabled.
+Confirm that the monitor was created second as script 2 and the fetcher third as script 3. Their own auto-start options should remain disabled. Start only the controller.
 
 ### The output or outputs stay off
 
@@ -105,7 +116,7 @@ Reboot it once from **Settings -> Reboot** after confirming that the readable sc
 
 ### The scripts received different ID numbers
 
-The easiest clean-device fix is to delete only these two scripts, wait for the Shelly to return if it reboots, and create the controller first and the monitor second. Advanced users can instead change `monitorScriptId` in the controller and `controllerScriptId` in the monitor.
+The easiest clean-device fix is to delete only these three scripts, wait for the Shelly to return if it reboots, and recreate them in controller-monitor-fetcher order. Advanced users can instead update the script IDs in each `CONFIG` object.
 
 ## Electrical safety
 
