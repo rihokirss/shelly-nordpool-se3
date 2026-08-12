@@ -1,125 +1,104 @@
 # Easy installation guide
 
-This guide installs the Nord Pool SE3 controller on a clean one- or two-output Shelly Gen3 or Gen4. You do not need programming experience. Three readable scripts are used: the controller, the status/watchdog monitor and a small price fetcher.
+This guide installs the Nord Pool SE3 controller on a clean one- or two-output Shelly Gen3 or Gen4. No programming experience is needed. The current version uses two scripts.
 
 ## Before you start
 
-You need:
+You need a Shelly connected to Wi-Fi and the internet, current firmware, correct local time, and the timezone set to Finnish/Aland time such as `Europe/Helsinki`. Perform the first test without connected loads.
 
-- a one- or two-output Shelly Gen3 or Gen4 connected to Wi-Fi and the internet;
-- its local web address, for example `http://192.168.1.100`;
-- current Shelly firmware;
-- the Shelly timezone set to Finnish/Aland time, for example `Europe/Helsinki`;
-- no load connected while doing the first test.
-
-The clean installation expects the controller to become script 1, the monitor script 2 and the fetcher script 3. Create them in exactly this order. Do not start the controller until all three have been saved.
+For the default IDs, create the controller first so it becomes script 1 and the monitor second so it becomes script 2.
 
 ## 1. Install the controller
 
-1. Open the Shelly web address in a browser.
-2. Select **Scripts** in the left menu.
-3. Select **Create script**.
-4. Enter the name `NordPool SE3`.
-5. In GitHub, open [`shelly-nordpool-se3.js`](shelly-nordpool-se3.js).
-6. Select **Raw**, select all the text and copy it.
-7. Paste the copied text into the empty Shelly script editor. Replace any example text already in the editor.
-8. Select **Save**.
-9. Enable the script's **Run on startup** or **Auto start** option.
-10. Save it, but do not select **Start** yet.
+1. Open the Shelly web interface and select **Scripts**.
+2. Select **Create script** and name it `NordPool SE3`.
+3. Open [`shelly-nordpool-se3.js`](shelly-nordpool-se3.js) on GitHub, select **Raw**, copy all text and paste it into the Shelly editor.
+4. Save the script.
+5. Enable **Run on startup** (or **Auto start**), but do not start it yet.
 
-Do not start it yet. Create the next two scripts first.
+## 2. Install the monitor
 
-## 2. Install the status monitor
+1. Return to **Scripts**, create another script and name it `NordPool SE3 monitor`.
+2. Open [`shelly-nordpool-se3-monitor.js`](shelly-nordpool-se3-monitor.js), select **Raw**, copy all text and paste it into the editor.
+3. Save it and leave its own **Run on startup** disabled.
+4. Do not start it manually.
 
-1. Return to **Scripts** and select **Create script** again.
-2. Enter the name `NordPool SE3 monitor`.
-3. In GitHub, open [`shelly-nordpool-se3-monitor.js`](shelly-nordpool-se3-monitor.js).
-4. Select **Raw**, select all the text and copy it.
-5. Paste the copied text into the Shelly editor and select **Save**.
-6. Leave this script's own **Run on startup** or **Auto start** option disabled.
-7. Do not start it manually.
+No fetcher script is required. If this is an upgrade and a `NordPool SE3 fetcher` script exists, stop it, disable auto-start and delete it.
 
-## 3. Install the price fetcher
+## 3. Start the controller
 
-1. Select **Create script** once more.
-2. Enter the name `NordPool SE3 fetcher`.
-3. In GitHub, open [`shelly-nordpool-se3-fetcher.js`](shelly-nordpool-se3-fetcher.js).
-4. Select **Raw**, select all the text and copy it.
-5. Paste it into the Shelly editor and select **Save**.
-6. Leave its **Run on startup** or **Auto start** option disabled.
-7. Do not start it manually.
+Open `NordPool SE3` and select **Start**. The controller automatically starts the monitor.
 
-The fetcher is intentionally separate because Shelly gives scripts a small shared JavaScript memory pool even on Gen4 devices. The controller starts the tiny fetcher once for each of the two required market dates. Each run stops itself after staging small KVS chunks; the controller then builds the final plan outside the HTTP worker.
-
-## 4. Start and check the controller
-
-1. Open the `NordPool SE3` controller script.
-2. Select **Start**.
-3. Wait up to two minutes for the first two-phase price download.
-
-Then open **Components**, look for the **Nord Pool SE3** group and confirm that it contains **OUT0 cheap hours**, initially `6`. On a two-output device it also contains **OUT1 cheap hours**, initially `3`.
-
-A successful first download appears in the controller console as a line similar to:
+Within a short time, the controller console should contain lines similar to:
 
 ```text
-[NordPool SE3] Accepted fetched plan for 2026-08-08
+[NordPool SE3] Detected 2 switch outputs
+[NordPool SE3] Settings: OUT0=6 h, OUT1=3 h
+[NordPool SE3] Fetching compact SE3 prices for 2026-08-12
+[NordPool SE3] Accepted compact plan for 2026-08-12 (96 quarters)
 ```
 
-The date will be different. A one-output device shows only `OUT0=24`. A local day contains 92, 96 or 100 intervals depending on daylight saving time.
+The date and output count may differ. If the current interval is not selected, both relays correctly remain off.
 
-## 5. Check the complete installation
+## 4. Check Components
 
-Open **Components -> Nord Pool SE3**. A two-output device contains five items; a one-output device contains four because OUT1 is omitted:
+Open **Components → Nord Pool SE3**. A two-output device should show:
 
-- **OUT0 cheap hours**;
-- **OUT1 cheap hours**, only on a two-output device;
-- **Run today** - completed scheduled cheap periods today;
-- **Now** - planned and actual relay states;
-- **Next** - the next planned state change for each output.
+- **OUT0 cheap hours**, initially 6
+- **OUT1 cheap hours**, initially 3
+- **Run today**
+- **Now**
+- **Next**
+
+A one-output device omits OUT1. It never sends commands to a nonexistent second output.
 
 Open **Scripts** and confirm:
 
 - `NordPool SE3` is running and auto-start is enabled;
 - `NordPool SE3 monitor` is running and its own auto-start is disabled;
-- `NordPool SE3 fetcher` is normally stopped and its own auto-start is disabled.
+- there is no active `NordPool SE3 fetcher`.
 
-It is normal for the controller and monitor to stop briefly while the fetcher downloads prices. They start again automatically.
+The monitor can stop for a moment during a price download and then start again automatically.
 
-## 6. Choose the daily run time
+## 5. Choose daily run time
 
-Open **Components -> Nord Pool SE3** and change either hour setting.
+Change the hour settings under **Components → Nord Pool SE3**:
 
-- `6.00` means the 24 cheapest quarter-hours.
-- `3.00` means the 12 cheapest quarter-hours.
-- `0.25` means the single cheapest quarter-hour.
-- `0.00` disables that output.
+- `6.00` selects the 24 cheapest quarter-hours;
+- `3.00` selects the 12 cheapest quarter-hours;
+- `0.25` selects one cheapest quarter-hour;
+- `0.00` disables the output.
 
-The intervals do not need to be consecutive. After a setting changes, all available outputs stay safely off until a complete replacement price plan has been downloaded.
+Intervals do not need to be consecutive. A settings change safely turns outputs off until the replacement plan has been calculated.
 
 ## If something does not work
 
-### The Nord Pool SE3 group does not appear
+### The group does not appear
 
-Open the controller console and look for an error. Check that the device has internet access, correct local time and the correct timezone. Also confirm that the controller is script 1.
+Open the controller console. Confirm correct time/timezone and that controller is script 1. A conflict with virtual component IDs 250–252 stops installation safely.
 
 ### Run today, Now and Next do not appear
 
-Confirm that the monitor was created second as script 2 and the fetcher third as script 3. Their own auto-start options should remain disabled. Start only the controller.
+Confirm that the monitor was created as script 2 and contains the current complete file. Start only the controller; it starts the monitor.
 
-### The output or outputs stay off
+### Gen4 says `Script ran out of memory`
 
-This is the safe state. The usual causes are missing device time, no complete price response yet or all available hour settings being zero. The controller retries a missing price plan every five minutes.
+Verify that only the current controller and monitor are installed. The controller's first configuration lines must contain `feedBase` with `raw.githubusercontent.com`. An old controller that references Nord Pool's large API directly, or an old fetcher script, is not the current version.
 
-### The device starts in safe mode
+### Outputs stay off
 
-Reboot it once from **Settings -> Reboot** after confirming that the readable scripts were copied completely. In Shelly safe mode, scripts do not start automatically.
+OFF is the safe state. Check device time, internet, hour settings and both script consoles. The controller retries a missing price file every five minutes.
 
-### The scripts received different ID numbers
+### The device is in safe mode
 
-The easiest clean-device fix is to delete only these three scripts, wait for the Shelly to return if it reboots, and recreate them in controller-monitor-fetcher order. Advanced users can instead update the script IDs in each `CONFIG` object.
+Scripts do not auto-start in Shelly safe mode. Reboot once from **Settings → Reboot**, then start the controller manually and inspect its console.
+
+### Scripts have different IDs
+
+On a clean device, delete only these automation scripts and recreate controller first, monitor second. Advanced users may instead change `monitorScriptId` in the controller and `controllerScriptId` in the monitor.
 
 ## Electrical safety
 
-The first test should be performed without connected loads. Before connecting heating equipment, verify the exact Shelly model's per-channel current and power limits. Use correctly rated contactors for loads that exceed the relay limits, have high inrush current or require electrical isolation. Mains wiring should be performed by a qualified person.
+Test without connected loads. Verify the exact Shelly model's channel, total-power and inrush limits before connecting equipment. Use suitable contactors when required. Mains wiring should be performed by a qualified person.
 
-For detailed behavior, troubleshooting and safe removal instructions, see [`README.md`](README.md).
+For technical behavior, fail-safe details and removal instructions, see [README.md](README.md).

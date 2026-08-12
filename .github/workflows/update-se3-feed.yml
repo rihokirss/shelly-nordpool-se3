@@ -1,0 +1,45 @@
+name: Update SE3 price feed
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-se3-feed
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build compact feed
+        run: node scripts/update-se3-feed.mjs /tmp/se3-feed
+      - name: Publish prices branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin prices:prices || true
+          if git show-ref --verify --quiet refs/heads/prices; then
+            git switch prices
+          else
+            git switch --orphan prices
+            git rm -rf . || true
+          fi
+          mkdir -p se3
+          cp /tmp/se3-feed/*.json se3/
+          git add se3
+          if git diff --cached --quiet; then
+            echo "Feed is unchanged"
+          else
+            git commit -m "Update SE3 prices"
+            git push origin prices
+          fi

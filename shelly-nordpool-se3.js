@@ -1,12 +1,9 @@
 var CONFIG = {
   area: "SE3",
-  api: "https://dataportal-api.nordpoolgroup.com/api/DayAheadPrices",
+  feedBase: "https://raw.githubusercontent.com/rihokirss/shelly-nordpool-se3/prices/se3/",
   kvsKey: "np_se3_plan_v1",
-  requestKey: "np_se3_req_v1",
-  tempPrefix: "np_se3_tmp_",
   outputIds: [0, 1],
   monitorScriptId: 2,
-  fetcherScriptId: 3,
   numberIds: [250, 251],
   groupId: 250,
   defaultHours: [6, 3],
@@ -28,8 +25,7 @@ var state = {
   plans: [],
   busy: false,
   ready: false,
-  lastTry: 0,
-  job: null
+  lastTry: 0
 };
 
 function log(message) {
@@ -136,53 +132,12 @@ function planFromCodes(job, codes) {
   return { d: job.d, n: job.n, a: orderMask(order, first, job.n), b: orderMask(order, second, job.n), x: first, y: second };
 }
 
-function loadStaged(job, done) {
-  var total = job.parts[0] + job.parts[1];
-  var index = 0;
-  var codes = "";
-  if (total < 2 || total > 6) return done(null);
-  function next() {
-    if (index >= total) return done(codes);
-    Shelly.call("KVS.Get", { key: CONFIG.tempPrefix + index }, function (result, errorCode) {
-      if (errorCode !== 0 || !result || typeof result.value !== "string") return done(null);
-      codes += result.value;
-      index++;
-      next();
-    });
+function codesAreValid(codes) {
+  for (var index = 0; index < codes.length; index++) {
+    var code = codes.charCodeAt(index);
+    if (code < 48 || code > 57) return false;
   }
-  next();
-}
-
-function clearStaged(done) {
-  var index = 0;
-  function next() {
-    if (index >= 6) {
-      Shelly.call("KVS.Delete", { key: CONFIG.requestKey }, function () { done(); });
-      return;
-    }
-    Shelly.call("KVS.Delete", { key: CONFIG.tempPrefix + index }, function () {
-      index++;
-      next();
-    });
-  }
-  next();
-}
-
-function acceptStaged(job, done) {
-  loadStaged(job, function (codes) {
-    try {
-      if (!codes) throw new Error("Staged prices missing");
-      var plan = planFromCodes(job, codes);
-      if (!planIsValid(plan)) throw new Error("Staged plan invalid");
-      replacePlan(plan);
-      savePlans();
-      log("Accepted fetched plan for " + dateText(plan.d));
-    } catch (error) {
-      log(error.message || "Ignored staged prices");
-    }
-    state.job = null;
-    clearStaged(done);
-  });
+  return true;
 }
 
 function findPlan(key) {
@@ -239,32 +194,7 @@ function loadPlans(done) {
         log("Ignored invalid cache");
       }
     }
-    Shelly.call("KVS.Get", { key: CONFIG.requestKey }, function (requestResult, requestError) {
-      if (requestError === 0 && requestResult) {
-        try {
-          var request = typeof requestResult.value === "string" ? JSON.parse(requestResult.value) : requestResult.value;
-          if (request && request.plan && planIsValid(request.plan)) {
-            replacePlan(request.plan);
-            savePlans();
-            log("Accepted fetched plan for " + dateText(request.plan.d));
-            Shelly.call("KVS.Delete", { key: CONFIG.requestKey }, function () { done(); });
-            return;
-          }
-          if (request && request.phase === 2 && request.parts) {
-            state.job = request;
-            acceptStaged(request, done);
-            return;
-          }
-          if (request && (request.phase === 0 || request.phase === 1) && request.m && request.parts) {
-            state.job = request;
-          }
-          if (request && request.retry && request.retry > Date.now()) state.lastTry = Date.now();
-        } catch (error) {
-          log("Ignored invalid fetch request");
-        }
-      }
-      done();
-    });
+    done();
   });
 }
 
@@ -323,39 +253,36 @@ function missingPlanDate() {
   return null;
 }
 
-function outputsAreOff() {
-  for (var channel = 0; channel < state.outputCount; channel++) {
-    var status = Shelly.getComponentStatus("switch", CONFIG.outputIds[channel]);
-    if (status && status.output) return false;
+function compactFeedReceived(target, result, errorCode, errorMessage) {
+  try {
+    if (errorCode !== 0) throw new Error(errorMessage || "HTTP request failed");
+    if (!result || result.code !== 200 || typeof result.body !== "string") {
+      throw new Error("HTTP status " + (result ? result.code : "unknown"));
+    }
+    var feed = JSON.parse(result.body);
+    var expected = Math.round((dayBounds(target)[1] - dayBounds(target)[0]) / 900000);
+    if (!feed || feed.v !== 1 || feed.d !== target || feed.n !== expected ||
+        typeof feed.c !== "string" || feed.c.length !== expected * 8 ||
+        !codesAreValid(feed.c)) throw new Error("Invalid compact price feed");
+    var plan = planFromCodes({ d: target, n: expected }, feed.c);
+    if (!planIsValid(plan)) throw new Error("Invalid calculated plan");
+    replacePlan(plan);
+    savePlans();
+    log("Accepted compact plan for " + dateText(target) + " (" + expected + " quarters)");
+  } catch (error) {
+    log("Price fetch failed for " + dateText(target) + ": " + (error.message || error));
   }
-  return true;
+  state.busy = false;
+  applyOutputs(false);
+  startMonitor();
 }
 
-function stopForFetcher() {
-  Shelly.call("Script.Stop", { id: Script.id });
-}
-
-function fetcherStarted(result, errorCode, errorMessage) {
-  if (errorCode !== 0) {
-    state.busy = false;
-    log("Could not start price fetcher: " + errorMessage);
-    startMonitor();
-    return;
-  }
-  Timer.set(1500, false, stopForFetcher);
-}
-
-function monitorStoppedForFetch() {
-  Shelly.call("Script.Start", { id: CONFIG.fetcherScriptId }, fetcherStarted);
-}
-
-function fetchRequestSaved(result, errorCode, errorMessage) {
-  if (errorCode !== 0) {
-    state.busy = false;
-    log("Could not save fetch request: " + errorMessage);
-    return;
-  }
-  Shelly.call("Script.Stop", { id: CONFIG.monitorScriptId }, monitorStoppedForFetch);
+function monitorStoppedForFetch(target) {
+  var url = CONFIG.feedBase + target + ".json";
+  log("Fetching compact SE3 prices for " + dateText(target));
+  Shelly.call("HTTP.GET", { url: url, timeout: 20 }, function (result, errorCode, errorMessage) {
+    compactFeedReceived(target, result, errorCode, errorMessage);
+  });
 }
 
 function requestPrices(force) {
@@ -369,33 +296,11 @@ function requestPrices(force) {
     startMonitor();
     return;
   }
-  if (!outputsAreOff()) {
-    applyOutputs(false);
-    startMonitor();
-    return;
-  }
   state.busy = true;
   state.lastTry = Date.now();
-  if (state.job && state.job.d === target && state.job.phase < 2) {
-    state.job.retry = 0;
-    Shelly.call("KVS.Set", { key: CONFIG.requestKey, value: JSON.stringify(state.job) }, fetchRequestSaved);
-    return;
-  }
-  var bounds = dayBounds(target);
-  var request = {
-    d: target,
-    h: [channelHours(0), channelHours(1)],
-    c: state.outputCount,
-    retry: 0,
-    phase: 0,
-    count: 0,
-    parts: [0, 0],
-    m: [addDay(target, -1), target],
-    s: bounds[0],
-    n: Math.round((bounds[1] - bounds[0]) / 900000)
-  };
-  state.job = request;
-  Shelly.call("KVS.Set", { key: CONFIG.requestKey, value: JSON.stringify(request) }, fetchRequestSaved);
+  Shelly.call("Script.Stop", { id: CONFIG.monitorScriptId }, function () {
+    monitorStoppedForFetch(target);
+  });
 }
 
 function startMonitor() {
@@ -416,7 +321,6 @@ function readChangedSettings() {
   if (hours0 === state.hours[0] && hours1 === state.hours[1]) return;
   state.hours = [hours0, hours1];
   state.plans = [];
-  state.job = null;
   state.lastTry = 0;
   var settingsText = "OUT0=" + hours0 + " h";
   if (state.outputCount > 1) settingsText += ", OUT1=" + hours1 + " h";

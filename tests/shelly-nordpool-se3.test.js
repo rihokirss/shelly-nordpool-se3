@@ -159,10 +159,13 @@ test("current slot indexing follows elapsed absolute quarters across the local d
   assert.equal(controller.currentSlotIndex(plan, bounds.end), -1);
 });
 
-test("readable controller delegates a missing plan to the price fetcher", () => {
+test("readable controller accepts the compact published price feed", () => {
   const logs = [];
   const kvsWrites = [];
   const monitorCalls = [];
+  const currentKey = controller.localDateKey(new Date());
+  const localSlots = makeLocalDaySlots(currentKey, (index) => 100 - index);
+  const codes = localSlots.map((slot) => String(Math.round(slot.price * 1000) + 50000000).padStart(8, "0")).join("");
   let monitorRunning = true;
 
   const context = {
@@ -200,7 +203,11 @@ test("readable controller delegates a missing plan to the price fetcher", () => 
         } else if (method === "KVS.Set") {
           kvsWrites.push(params.value);
           callback({}, 0, "");
+        } else if (method === "HTTP.GET") {
+          assert.match(params.url, new RegExp(`/prices/se3/${currentKey}\\.json$`));
+          callback({ code: 200, body: JSON.stringify({ v: 1, d: currentKey, n: localSlots.length, c: codes }) }, 0, "");
         } else if (method === "Script.Stop") {
+          monitorRunning = false;
           monitorCalls.push(`${method}:${params.id}`);
           if (callback) callback({}, 0, "");
         } else if (method === "Script.Start") {
@@ -218,17 +225,21 @@ test("readable controller delegates a missing plan to the price fetcher", () => 
   vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
 
   assert.equal(kvsWrites.length, 1);
-  assert.deepEqual(JSON.parse(kvsWrites[0]).h, [6, 3]);
-  assert.deepEqual(monitorCalls, ["Script.Stop:2", "Script.Start:3", "Script.Stop:1"]);
-  assert.equal(context.state.busy, true);
+  const stored = JSON.parse(kvsWrites[0]);
+  assert.equal(stored.p[0].d, currentKey);
+  assert.equal(stored.p[0].x, 24);
+  assert.equal(stored.p[0].y, 12);
+  assert.deepEqual(monitorCalls, ["Script.Stop:2", "Script.Start:2"]);
+  assert.equal(context.state.busy, false);
+  assert.match(logs.join("\n"), /Accepted compact plan/);
 });
 
-test("controller restarts the watchdog while a failed fetch waits for retry", () => {
+test("controller restarts the watchdog after a compact feed failure", () => {
   const scriptStarts = [];
-  const retry = JSON.stringify({ d: controller.localDateKey(new Date()), h: [6, 3], c: 2, retry: Date.now() + 300000 });
+  const logs = [];
   const context = {
     Script: { id: 1 },
-    print: () => undefined,
+    print: (line) => logs.push(line),
     Timer: { set: () => 1, clear: () => undefined },
     Shelly: {
       getDeviceInfo: () => ({ app: "S2PMG3", ver: "2.0.0" }),
@@ -249,8 +260,11 @@ test("controller restarts the watchdog while a failed fetch waits for retry", ()
         } else if (method === "Group.Set" || method === "Switch.Set") {
           callback({}, 0, "");
         } else if (method === "KVS.Get") {
-          callback(params.key === "np_se3_req_v1" ? { value: retry } : null,
-            params.key === "np_se3_req_v1" ? 0 : 1, "Not found");
+          callback(null, 1, "Not found");
+        } else if (method === "Script.Stop") {
+          if (callback) callback({}, 0, "");
+        } else if (method === "HTTP.GET") {
+          callback({ code: 503, body: "unavailable" }, 0, "");
         } else if (method === "Script.Start") {
           scriptStarts.push(params.id);
           if (callback) callback({}, 0, "");
@@ -265,6 +279,7 @@ test("controller restarts the watchdog while a failed fetch waits for retry", ()
   vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
   assert.deepEqual(scriptStarts, [2]);
   assert.equal(context.state.busy, false);
+  assert.match(logs.join("\n"), /Price fetch failed/);
 });
 
 test("production runtime detects a one-output Shelly and omits OUT1 controls", () => {
@@ -273,6 +288,9 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
   const groupCalls = [];
   const switchCalls = [];
   const kvsWrites = [];
+  const currentKey = controller.localDateKey(new Date());
+  const localSlots = makeLocalDaySlots(currentKey, (index) => index);
+  const codes = localSlots.map((slot) => String(Math.round(slot.price * 1000) + 50000000).padStart(8, "0")).join("");
 
   const context = {
     Script: { id: 1 },
@@ -306,6 +324,8 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
         } else if (method === "KVS.Set") {
           kvsWrites.push(params.value);
           callback({}, 0, "");
+        } else if (method === "HTTP.GET") {
+          callback({ code: 200, body: JSON.stringify({ v: 1, d: currentKey, n: localSlots.length, c: codes }) }, 0, "");
         } else if (method === "Script.Start" || method === "Script.Stop") {
           if (callback) callback({}, 0, "");
         } else if (method === "Switch.Set") {
@@ -322,7 +342,7 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
   vm.runInNewContext(fs.readFileSync(runtimePath, "utf8"), context, { filename: runtimePath });
 
   assert.equal(context.state.outputCount, 1);
-  assert.deepEqual(JSON.parse(kvsWrites[0]).h, [6, 0]);
+  assert.equal(JSON.parse(kvsWrites[0]).p[0].y, 0);
   assert.deepEqual(virtualAdds.filter((item) => item.type === "number").map((item) => item.id), [250]);
   assert.deepEqual(Array.from(groupCalls[0].value), ["number:250"]);
   assert.ok(switchCalls.every((item) => item.id === 0));
@@ -333,70 +353,12 @@ test("production runtime detects a one-output Shelly and omits OUT1 controls", (
 test("production runtime avoids mJS methods missing from Shelly firmware 2.0", () => {
   const runtimePath = path.join(__dirname, "..", "shelly-nordpool-se3.js");
   const runtime = fs.readFileSync(runtimePath, "utf8");
-  const fetcher = fs.readFileSync(path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js"), "utf8");
   assert.doesNotMatch(runtime, /\.setDate\s*\(/);
   assert.doesNotMatch(runtime, /\.sort\s*\(/);
-  assert.doesNotMatch(fetcher, /\.setDate\s*\(/);
-  assert.doesNotMatch(fetcher, /\.sort\s*\(/);
-  assert.ok(Buffer.byteLength(fetcher, "utf8") < 5000, "HTTP worker must stay below 5 kB for Gen4 mJS headroom");
+  assert.match(runtime, /raw\.githubusercontent\.com/);
 });
 
-test("tiny fetcher stages two market responses in separate runs", () => {
-  const currentKey = controller.localDateKey(new Date());
-  const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
-  const bounds = controller.localDayBounds(currentKey);
-  const store = {
-    np_se3_req_v1: JSON.stringify({
-      d: currentKey, h: [1, 23], c: 2, retry: 0, phase: 0, count: 0,
-      parts: [0, 0], m: [controller.addDaysKey(currentKey, -1), currentKey],
-      s: bounds.start, n: localSlots.length
-    })
-  };
-  const scriptCalls = [];
-  let httpCalls = 0;
-
-  function runFetcher(body) {
-    const context = {
-      Script: { id: 3 },
-      print: () => undefined,
-      Shelly: {
-        call: (method, params, callback) => {
-          if (method === "KVS.Get") {
-            callback(store[params.key] === undefined ? null : { value: store[params.key] },
-              store[params.key] === undefined ? 1 : 0, "");
-          } else if (method === "HTTP.GET") {
-            httpCalls++;
-            callback({ code: 200, body }, 0, "");
-          } else if (method === "KVS.Set") {
-            store[params.key] = params.value;
-            callback({}, 0, "");
-          } else if (method === "Script.Start" || method === "Script.Stop") {
-            scriptCalls.push(`${method}:${params.id}`);
-            if (callback) callback({}, 0, "");
-          } else {
-            throw new Error(`Unexpected fetcher call: ${method}`);
-          }
-        }
-      }
-    };
-    const fetcherPath = path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js");
-    vm.runInNewContext(fs.readFileSync(fetcherPath, "utf8"), context, { filename: fetcherPath });
-  }
-
-  runFetcher(responseBody(localSlots.slice(0, 4)));
-  assert.equal(JSON.parse(store.np_se3_req_v1).phase, 1);
-  runFetcher(responseBody(localSlots.slice(4)));
-
-  assert.equal(httpCalls, 2);
-  const stored = JSON.parse(store.np_se3_req_v1);
-  const staged = Array.from({ length: stored.parts[0] + stored.parts[1] }, (_, index) => store[`np_se3_tmp_${index}`]).join("");
-  assert.equal(stored.phase, 2);
-  assert.equal(stored.count, localSlots.length);
-  assert.equal(staged.length, localSlots.length * 8);
-  assert.deepEqual(scriptCalls, ["Script.Start:1", "Script.Stop:3", "Script.Start:1", "Script.Stop:3"]);
-});
-
-test("controller builds mixed cheap and expensive selections from staged codes", () => {
+test("controller builds mixed cheap and expensive selections from compact codes", () => {
   const currentKey = controller.localDateKey(new Date());
   const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
   const codes = localSlots.map((slot) => String(Math.round(slot.price * 1000) + 50000000).padStart(8, "0")).join("");
