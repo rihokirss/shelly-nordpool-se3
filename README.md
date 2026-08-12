@@ -194,7 +194,7 @@ Another component already uses `group:250`, `number:250`, `number:251` or one of
 
 ### The fetcher reports `Script ran out of memory` on Gen4
 
-Replace only script 3 with the latest `shelly-nordpool-se3-fetcher.js`, keep its auto-start disabled and start the controller. The current readable fetcher is kept below 8 kB and adaptively stores the smaller of cheap ON or expensive OFF selections to preserve Gen4 mJS headroom. Do not enable auto-start for the monitor or fetcher.
+Replace script 1 with the latest `shelly-nordpool-se3.js` and script 3 with the latest `shelly-nordpool-se3-fetcher.js`. Keep controller auto-start enabled, keep monitor and fetcher auto-start disabled, and then start only the controller. The current readable fetcher is kept below 8 kB and adaptively stores the smaller of cheap ON or expensive OFF selections to preserve Gen4 mJS headroom.
 
 ## Removal and rollback
 
