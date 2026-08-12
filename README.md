@@ -25,7 +25,9 @@ The feed builder:
 - verifies numeric prices, unique ordered timestamps, 15-minute duration and a complete 92/96/100-interval day;
 - encodes price order with fixed-width values so equal prices retain chronological order.
 
-The workflow runs hourly. Source: [`scripts/update-se3-feed.mjs`](scripts/update-se3-feed.mjs). Workflow: [`.github/workflows/update-se3-feed.yml`](.github/workflows/update-se3-feed.yml).
+The workflow checks hourly, but does not query Nord Pool when all required files already exist. Before 20:00 Aland/Finnish time it only requires today's file; from 20:00 onward it also requires tomorrow's file. A missing file is retried on the next hourly check. Source: [`scripts/update-se3-feed.mjs`](scripts/update-se3-feed.mjs). Workflow: [`.github/workflows/update-se3-feed.yml`](.github/workflows/update-se3-feed.yml).
+
+The `prices` branch keeps the most recent 30 local calendar days plus a possible tomorrow file. It is a generated snapshot branch with a single current commit: each actual update replaces that snapshot instead of accumulating price-file history. The normal `main` branch and its source-code history are not rewritten.
 
 ## Requirements
 

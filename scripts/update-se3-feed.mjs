@@ -73,9 +73,11 @@ async function buildDay(key) {
 }
 
 const today = dateKey(new Date());
-const targets = [today, addDay(today, 1)];
+const requestedTargets = process.argv.slice(3);
+const targets = requestedTargets.length ? requestedTargets : [today, addDay(today, 1)];
 await fs.mkdir(OUTPUT, { recursive: true });
 for (const target of targets) {
+  if (!/^\d{8}$/.test(target)) throw new Error(`Invalid target date: ${target}`);
   try {
     const body = await buildDay(target);
     await fs.writeFile(path.join(OUTPUT, `${target}.json`), body + "\n", "utf8");
