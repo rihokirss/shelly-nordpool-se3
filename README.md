@@ -64,9 +64,9 @@ The group and settings for the detected outputs appear as soon as the controller
 
 `shelly-nordpool-se3.js` is the readable production runtime used on the device. An extended source with Node-test exports is kept in `src/shelly-nordpool-se3.source.js` for regression testing of the date, selection and KVS algorithms.
 
-`shelly-nordpool-se3-monitor.js` creates the three status fields and provides the fail-safe watchdog. `shelly-nordpool-se3-fetcher.js` is a minimal HTTP runtime that downloads and validates prices, hands one compact day to the controller and then stops itself.
+`shelly-nordpool-se3-monitor.js` creates the three status fields and provides the fail-safe watchdog. `shelly-nordpool-se3-fetcher.js` is a tiny HTTP worker that downloads and validates one market date per run, stages compact price codes and then stops itself.
 
-Shelly scripts share a small mJS memory pool even when a Gen4 device has substantially more system RAM. Before a download, the controller waits until outputs are OFF, stops the monitor, starts the low-memory fetcher and stops itself. The fetcher adaptively retains either cheap ON slots or expensive OFF slots, whichever combination is smaller for the two hour settings. It stages one compact day or a five-minute retry time, restarts the controller and stops itself. This leaves headroom for the roughly 11 kB Nord Pool response.
+Shelly scripts share a small mJS memory pool even when a Gen4 device has substantially more system RAM. Before a download, the controller waits until outputs are OFF, stops the monitor, starts the HTTP worker and stops itself. The worker is below 5 kB and handles only one roughly 11 kB Nord Pool response at a time. It stores fixed-width price codes in temporary KVS chunks, restarts the controller and stops. The controller invokes it again for the adjacent market date, then combines the chunks and calculates both masks after the HTTP body is no longer in memory.
 
 ## Configuration
 
@@ -98,6 +98,8 @@ np_se3_plan_v1
 ```
 
 The KVS value contains compact bitmasks for the current and next local day. This allows a valid current plan to survive a reboot or a temporary internet outage.
+
+During a download, `np_se3_req_v1` and up to six `np_se3_tmp_0` ... `np_se3_tmp_5` keys hold resumable phase state and compact price chunks. They are deleted automatically after the controller accepts a complete day. These temporary keys never replace `np_se3_plan_v1` directly.
 
 ## Failure and fail-safe behavior
 
@@ -160,7 +162,7 @@ For a test that fetches and calculates prices without changing outputs, temporar
 dryRun: true
 ```
 
-in the controller's `CONFIG` object before uploading. Relay commands are then suppressed. Price-download messages appear in the fetcher console and plan/application messages appear in the controller console. Restore `dryRun: false`, save and restart for production use.
+in the controller's `CONFIG` object before uploading. Relay commands are then suppressed. Fetch failures appear in the fetcher console and accepted-plan/application messages appear in the controller console. Restore `dryRun: false`, save and restart for production use.
 
 Local logic tests can be run with Node.js:
 
@@ -194,7 +196,7 @@ Another component already uses `group:250`, `number:250`, `number:251` or one of
 
 ### The fetcher reports `Script ran out of memory` on Gen4
 
-Replace script 1 with the latest `shelly-nordpool-se3.js` and script 3 with the latest `shelly-nordpool-se3-fetcher.js`. Keep controller auto-start enabled, keep monitor and fetcher auto-start disabled, and then start only the controller. The current readable fetcher is kept below 8 kB and adaptively stores the smaller of cheap ON or expensive OFF selections to preserve Gen4 mJS headroom.
+Replace script 1 with the latest `shelly-nordpool-se3.js` and script 3 with the latest `shelly-nordpool-se3-fetcher.js`. Keep controller auto-start enabled, keep monitor and fetcher auto-start disabled, and then start only the controller. The current HTTP worker is below 5 kB, fetches one market date per run and moves plan calculation out of the HTTP process. Matter support does not need to be disabled.
 
 ## Removal and rollback
 
@@ -202,7 +204,7 @@ Replace script 1 with the latest `shelly-nordpool-se3.js` and script 3 with the 
 2. Stop the `NordPool SE3` controller script.
 3. Turn every available output off.
 4. Delete the controller script.
-5. Delete only the KVS keys `np_se3_plan_v1` and `np_se3_req_v1`.
+5. Delete only the KVS keys `np_se3_plan_v1`, `np_se3_req_v1` and `np_se3_tmp_0` through `np_se3_tmp_5`.
 6. If they are no longer needed, delete `group:250`, `number:250` and, when it exists, `number:251` from Components.
 
 Do not bulk-delete KVS entries or virtual components; other automations may use them.

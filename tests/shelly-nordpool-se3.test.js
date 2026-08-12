@@ -338,58 +338,81 @@ test("production runtime avoids mJS methods missing from Shelly firmware 2.0", (
   assert.doesNotMatch(runtime, /\.sort\s*\(/);
   assert.doesNotMatch(fetcher, /\.setDate\s*\(/);
   assert.doesNotMatch(fetcher, /\.sort\s*\(/);
-  assert.ok(Buffer.byteLength(fetcher, "utf8") < 8000, "fetcher must stay below 8 kB for Gen4 mJS headroom");
+  assert.ok(Buffer.byteLength(fetcher, "utf8") < 5000, "HTTP worker must stay below 5 kB for Gen4 mJS headroom");
 });
 
-test("minimal fetcher stores mixed cheap-ON and expensive-OFF masks", () => {
+test("tiny fetcher stages two market responses in separate runs", () => {
   const currentKey = controller.localDateKey(new Date());
   const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
-  const request = JSON.stringify({ d: currentKey, h: [1, 23], c: 2, retry: 0 });
-  const writes = [];
+  const bounds = controller.localDayBounds(currentKey);
+  const store = {
+    np_se3_req_v1: JSON.stringify({
+      d: currentKey, h: [1, 23], c: 2, retry: 0, phase: 0, count: 0,
+      parts: [0, 0], m: [controller.addDaysKey(currentKey, -1), currentKey],
+      s: bounds.start, n: localSlots.length
+    })
+  };
   const scriptCalls = [];
   let httpCalls = 0;
 
-  const context = {
-    Script: { id: 3 },
-    print: () => undefined,
-    Timer: {
-      set: (delay, repeat, callback) => {
-        if (!repeat) callback();
-        return 1;
-      }
-    },
-    Shelly: {
-      call: (method, params, callback) => {
-        if (method === "KVS.Get" && params.key === "np_se3_req_v1") {
-          callback({ value: request }, 0, "");
-        } else if (method === "HTTP.GET") {
-          const part = httpCalls++ === 0 ? localSlots.slice(0, 4) : localSlots.slice(4);
-          callback({ code: 200, body: responseBody(part) }, 0, "");
-        } else if (method === "KVS.Set") {
-          writes.push(params);
-          callback({}, 0, "");
-        } else if (method === "Script.Start" || method === "Script.Stop") {
-          scriptCalls.push(`${method}:${params.id}`);
-          if (callback) callback({}, 0, "");
-        } else {
-          throw new Error(`Unexpected fetcher call: ${method}`);
+  function runFetcher(body) {
+    const context = {
+      Script: { id: 3 },
+      print: () => undefined,
+      Shelly: {
+        call: (method, params, callback) => {
+          if (method === "KVS.Get") {
+            callback(store[params.key] === undefined ? null : { value: store[params.key] },
+              store[params.key] === undefined ? 1 : 0, "");
+          } else if (method === "HTTP.GET") {
+            httpCalls++;
+            callback({ code: 200, body }, 0, "");
+          } else if (method === "KVS.Set") {
+            store[params.key] = params.value;
+            callback({}, 0, "");
+          } else if (method === "Script.Start" || method === "Script.Stop") {
+            scriptCalls.push(`${method}:${params.id}`);
+            if (callback) callback({}, 0, "");
+          } else {
+            throw new Error(`Unexpected fetcher call: ${method}`);
+          }
         }
       }
-    }
-  };
+    };
+    const fetcherPath = path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js");
+    vm.runInNewContext(fs.readFileSync(fetcherPath, "utf8"), context, { filename: fetcherPath });
+  }
 
-  const fetcherPath = path.join(__dirname, "..", "shelly-nordpool-se3-fetcher.js");
-  vm.runInNewContext(fs.readFileSync(fetcherPath, "utf8"), context, { filename: fetcherPath });
+  runFetcher(responseBody(localSlots.slice(0, 4)));
+  assert.equal(JSON.parse(store.np_se3_req_v1).phase, 1);
+  runFetcher(responseBody(localSlots.slice(4)));
 
   assert.equal(httpCalls, 2);
-  const stored = JSON.parse(writes.find((item) => item.key === "np_se3_req_v1").value);
+  const stored = JSON.parse(store.np_se3_req_v1);
+  const staged = Array.from({ length: stored.parts[0] + stored.parts[1] }, (_, index) => store[`np_se3_tmp_${index}`]).join("");
+  assert.equal(stored.phase, 2);
+  assert.equal(stored.count, localSlots.length);
+  assert.equal(staged.length, localSlots.length * 8);
+  assert.deepEqual(scriptCalls, ["Script.Start:1", "Script.Stop:3", "Script.Start:1", "Script.Stop:3"]);
+});
+
+test("controller builds mixed cheap and expensive selections from staged codes", () => {
+  const currentKey = controller.localDateKey(new Date());
+  const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
+  const codes = localSlots.map((slot) => String(Math.round(slot.price * 1000) + 50000000).padStart(8, "0")).join("");
+  const runtimePath = path.join(__dirname, "..", "shelly-nordpool-se3.js");
+  const runtime = fs.readFileSync(runtimePath, "utf8").replace(/\nboot\(\);\s*$/, "");
+  const context = { print: () => undefined };
+  vm.runInNewContext(runtime, context, { filename: runtimePath });
+  context.state.outputCount = 2;
+  context.state.hours = [1, 23];
+  const stored = context.planFromCodes({ d: currentKey, n: localSlots.length }, codes);
   const expectedPlan = controller.buildPlan(currentKey, localSlots, [1, 23]);
-  assert.equal(stored.plan.n, localSlots.length);
-  assert.equal(stored.plan.x, 4);
-  assert.equal(stored.plan.y, 92);
-  assert.equal(stored.plan.a, controller.maskToHex(expectedPlan.masks[0]));
-  assert.equal(stored.plan.b, controller.maskToHex(expectedPlan.masks[1]));
-  assert.deepEqual(scriptCalls, ["Script.Start:1", "Script.Stop:3"]);
+  assert.equal(stored.n, localSlots.length);
+  assert.equal(stored.x, 4);
+  assert.equal(stored.y, 92);
+  assert.equal(stored.a, controller.maskToHex(expectedPlan.masks[0]));
+  assert.equal(stored.b, controller.maskToHex(expectedPlan.masks[1]));
 });
 
 test("monitor displays elapsed schedule and forces outputs off when controller stops", () => {

@@ -3,6 +3,7 @@ var CONFIG = {
   api: "https://dataportal-api.nordpoolgroup.com/api/DayAheadPrices",
   kvsKey: "np_se3_plan_v1",
   requestKey: "np_se3_req_v1",
+  tempPrefix: "np_se3_tmp_",
   outputIds: [0, 1],
   monitorScriptId: 2,
   fetcherScriptId: 3,
@@ -27,7 +28,8 @@ var state = {
   plans: [],
   busy: false,
   ready: false,
-  lastTry: 0
+  lastTry: 0,
+  job: null
 };
 
 function log(message) {
@@ -101,6 +103,88 @@ function countHexBits(hex, length) {
   return count;
 }
 
+function orderMask(order, limit, length) {
+  var digits = [];
+  var digitCount = Math.ceil(length / 4);
+  for (var index = 0; index < digitCount; index++) digits.push(0);
+  for (var rank = 0; rank < limit; rank++) {
+    var slot = order[rank];
+    digits[Math.floor(slot / 4)] += 1 << (slot % 4);
+  }
+  var text = "";
+  for (var digit = 0; digit < digitCount; digit++) text += digits[digit].toString(16);
+  return text;
+}
+
+function planFromCodes(job, codes) {
+  if (!job || codes.length !== job.n * 8) throw new Error("Incomplete staged prices");
+  var order = [];
+  for (var slot = 0; slot < job.n; slot++) {
+    var code = codes.substring(slot * 8, slot * 8 + 8);
+    var place = order.length;
+    for (var index = 0; index < order.length; index++) {
+      var other = codes.substring(order[index] * 8, order[index] * 8 + 8);
+      if (code < other) {
+        place = index;
+        break;
+      }
+    }
+    order.splice(place, 0, slot);
+  }
+  var first = wantedCount(channelHours(0), job.n);
+  var second = wantedCount(channelHours(1), job.n);
+  return { d: job.d, n: job.n, a: orderMask(order, first, job.n), b: orderMask(order, second, job.n), x: first, y: second };
+}
+
+function loadStaged(job, done) {
+  var total = job.parts[0] + job.parts[1];
+  var index = 0;
+  var codes = "";
+  if (total < 2 || total > 6) return done(null);
+  function next() {
+    if (index >= total) return done(codes);
+    Shelly.call("KVS.Get", { key: CONFIG.tempPrefix + index }, function (result, errorCode) {
+      if (errorCode !== 0 || !result || typeof result.value !== "string") return done(null);
+      codes += result.value;
+      index++;
+      next();
+    });
+  }
+  next();
+}
+
+function clearStaged(done) {
+  var index = 0;
+  function next() {
+    if (index >= 6) {
+      Shelly.call("KVS.Delete", { key: CONFIG.requestKey }, function () { done(); });
+      return;
+    }
+    Shelly.call("KVS.Delete", { key: CONFIG.tempPrefix + index }, function () {
+      index++;
+      next();
+    });
+  }
+  next();
+}
+
+function acceptStaged(job, done) {
+  loadStaged(job, function (codes) {
+    try {
+      if (!codes) throw new Error("Staged prices missing");
+      var plan = planFromCodes(job, codes);
+      if (!planIsValid(plan)) throw new Error("Staged plan invalid");
+      replacePlan(plan);
+      savePlans();
+      log("Accepted fetched plan for " + dateText(plan.d));
+    } catch (error) {
+      log(error.message || "Ignored staged prices");
+    }
+    state.job = null;
+    clearStaged(done);
+  });
+}
+
 function findPlan(key) {
   for (var index = 0; index < state.plans.length; index++) {
     if (state.plans[index].d === key) return state.plans[index];
@@ -165,6 +249,14 @@ function loadPlans(done) {
             log("Accepted fetched plan for " + dateText(request.plan.d));
             Shelly.call("KVS.Delete", { key: CONFIG.requestKey }, function () { done(); });
             return;
+          }
+          if (request && request.phase === 2 && request.parts) {
+            state.job = request;
+            acceptStaged(request, done);
+            return;
+          }
+          if (request && (request.phase === 0 || request.phase === 1) && request.m && request.parts) {
+            state.job = request;
           }
           if (request && request.retry && request.retry > Date.now()) state.lastTry = Date.now();
         } catch (error) {
@@ -284,12 +376,25 @@ function requestPrices(force) {
   }
   state.busy = true;
   state.lastTry = Date.now();
+  if (state.job && state.job.d === target && state.job.phase < 2) {
+    state.job.retry = 0;
+    Shelly.call("KVS.Set", { key: CONFIG.requestKey, value: JSON.stringify(state.job) }, fetchRequestSaved);
+    return;
+  }
+  var bounds = dayBounds(target);
   var request = {
     d: target,
     h: [channelHours(0), channelHours(1)],
     c: state.outputCount,
-    retry: 0
+    retry: 0,
+    phase: 0,
+    count: 0,
+    parts: [0, 0],
+    m: [addDay(target, -1), target],
+    s: bounds[0],
+    n: Math.round((bounds[1] - bounds[0]) / 900000)
   };
+  state.job = request;
   Shelly.call("KVS.Set", { key: CONFIG.requestKey, value: JSON.stringify(request) }, fetchRequestSaved);
 }
 
@@ -311,6 +416,7 @@ function readChangedSettings() {
   if (hours0 === state.hours[0] && hours1 === state.hours[1]) return;
   state.hours = [hours0, hours1];
   state.plans = [];
+  state.job = null;
   state.lastTry = 0;
   var settingsText = "OUT0=" + hours0 + " h";
   if (state.outputCount > 1) settingsText += ", OUT1=" + hours1 + " h";

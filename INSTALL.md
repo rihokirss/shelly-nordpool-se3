@@ -49,20 +49,20 @@ Do not start it yet. Create the next two scripts first.
 6. Leave its **Run on startup** or **Auto start** option disabled.
 7. Do not start it manually.
 
-The fetcher is intentionally separate because Shelly gives scripts a small shared JavaScript memory pool even on Gen4 devices. The controller starts the fetcher only while downloading prices and the fetcher stops itself afterwards.
+The fetcher is intentionally separate because Shelly gives scripts a small shared JavaScript memory pool even on Gen4 devices. The controller starts the tiny fetcher once for each of the two required market dates. Each run stops itself after staging small KVS chunks; the controller then builds the final plan outside the HTTP worker.
 
 ## 4. Start and check the controller
 
 1. Open the `NordPool SE3` controller script.
 2. Select **Start**.
-3. Wait up to one minute for the first price download.
+3. Wait up to two minutes for the first two-phase price download.
 
 Then open **Components**, look for the **Nord Pool SE3** group and confirm that it contains **OUT0 cheap hours**, initially `6`. On a two-output device it also contains **OUT1 cheap hours**, initially `3`.
 
-A successful first download appears in the fetcher console as a line similar to:
+A successful first download appears in the controller console as a line similar to:
 
 ```text
-[NordPool fetcher] Plan ready: 2026-08-08, 96 slots
+[NordPool SE3] Accepted fetched plan for 2026-08-08
 ```
 
 The date will be different. A one-output device shows only `OUT0=24`. A local day contains 92, 96 or 100 intervals depending on daylight saving time.
