@@ -338,12 +338,13 @@ test("production runtime avoids mJS methods missing from Shelly firmware 2.0", (
   assert.doesNotMatch(runtime, /\.sort\s*\(/);
   assert.doesNotMatch(fetcher, /\.setDate\s*\(/);
   assert.doesNotMatch(fetcher, /\.sort\s*\(/);
+  assert.ok(Buffer.byteLength(fetcher, "utf8") < 8000, "fetcher must stay below 8 kB for Gen4 mJS headroom");
 });
 
-test("minimal fetcher downloads two market dates and stores a 24/12 plan", () => {
+test("minimal fetcher stores mixed cheap-ON and expensive-OFF masks", () => {
   const currentKey = controller.localDateKey(new Date());
   const localSlots = makeLocalDaySlots(currentKey, (i) => 100 - i);
-  const request = JSON.stringify({ d: currentKey, h: [6, 3], c: 2, retry: 0 });
+  const request = JSON.stringify({ d: currentKey, h: [1, 23], c: 2, retry: 0 });
   const writes = [];
   const scriptCalls = [];
   let httpCalls = 0;
@@ -361,15 +362,11 @@ test("minimal fetcher downloads two market dates and stores a 24/12 plan", () =>
       call: (method, params, callback) => {
         if (method === "KVS.Get" && params.key === "np_se3_req_v1") {
           callback({ value: request }, 0, "");
-        } else if (method === "KVS.Get" && params.key === "np_se3_plan_v1") {
-          callback(null, 1, "Not found");
         } else if (method === "HTTP.GET") {
           const part = httpCalls++ === 0 ? localSlots.slice(0, 4) : localSlots.slice(4);
           callback({ code: 200, body: responseBody(part) }, 0, "");
         } else if (method === "KVS.Set") {
           writes.push(params);
-          callback({}, 0, "");
-        } else if (method === "KVS.Delete") {
           callback({}, 0, "");
         } else if (method === "Script.Start" || method === "Script.Stop") {
           scriptCalls.push(`${method}:${params.id}`);
@@ -385,10 +382,13 @@ test("minimal fetcher downloads two market dates and stores a 24/12 plan", () =>
   vm.runInNewContext(fs.readFileSync(fetcherPath, "utf8"), context, { filename: fetcherPath });
 
   assert.equal(httpCalls, 2);
-  const stored = JSON.parse(writes.find((item) => item.key === "np_se3_plan_v1").value);
-  assert.equal(stored.p[0].n, localSlots.length);
-  assert.equal(stored.p[0].x, 24);
-  assert.equal(stored.p[0].y, 12);
+  const stored = JSON.parse(writes.find((item) => item.key === "np_se3_req_v1").value);
+  const expectedPlan = controller.buildPlan(currentKey, localSlots, [1, 23]);
+  assert.equal(stored.plan.n, localSlots.length);
+  assert.equal(stored.plan.x, 4);
+  assert.equal(stored.plan.y, 92);
+  assert.equal(stored.plan.a, controller.maskToHex(expectedPlan.masks[0]));
+  assert.equal(stored.plan.b, controller.maskToHex(expectedPlan.masks[1]));
   assert.deepEqual(scriptCalls, ["Script.Start:1", "Script.Stop:3"]);
 });
 

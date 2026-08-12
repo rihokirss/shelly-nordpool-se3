@@ -62,10 +62,10 @@ Then open **Components**, look for the **Nord Pool SE3** group and confirm that 
 A successful first download appears in the fetcher console as a line similar to:
 
 ```text
-[NordPool fetcher] Plan 2026-08-08 saved: 96 intervals, OUT0=24, OUT1=12, prices=... EUR/MWh
+[NordPool fetcher] Plan ready: 2026-08-08, 96 slots
 ```
 
-The date and price range will be different. A one-output device shows only `OUT0=24`. A local day contains 92, 96 or 100 intervals depending on daylight saving time.
+The date will be different. A one-output device shows only `OUT0=24`. A local day contains 92, 96 or 100 intervals depending on daylight saving time.
 
 ## 5. Check the complete installation
 

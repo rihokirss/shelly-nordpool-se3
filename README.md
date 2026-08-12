@@ -64,9 +64,9 @@ The group and settings for the detected outputs appear as soon as the controller
 
 `shelly-nordpool-se3.js` is the readable production runtime used on the device. An extended source with Node-test exports is kept in `src/shelly-nordpool-se3.source.js` for regression testing of the date, selection and KVS algorithms.
 
-`shelly-nordpool-se3-monitor.js` creates the three status fields and provides the fail-safe watchdog. `shelly-nordpool-se3-fetcher.js` is a minimal HTTP runtime that downloads and validates prices, writes the compact plan and then stops itself.
+`shelly-nordpool-se3-monitor.js` creates the three status fields and provides the fail-safe watchdog. `shelly-nordpool-se3-fetcher.js` is a minimal HTTP runtime that downloads and validates prices, hands one compact day to the controller and then stops itself.
 
-Shelly scripts share a roughly 25 kB mJS memory pool even when the device has substantially more system RAM. Before a download, the controller waits until outputs are OFF, stops the monitor, starts the minimal fetcher and stops itself. The fetcher saves either a plan or a five-minute retry time, restarts the controller and stops itself. This prevents the 11 kB Nord Pool response from sharing the script pool with the larger controller and monitor runtimes.
+Shelly scripts share a small mJS memory pool even when a Gen4 device has substantially more system RAM. Before a download, the controller waits until outputs are OFF, stops the monitor, starts the low-memory fetcher and stops itself. The fetcher adaptively retains either cheap ON slots or expensive OFF slots, whichever combination is smaller for the two hour settings. It stages one compact day or a five-minute retry time, restarts the controller and stops itself. This leaves headroom for the roughly 11 kB Nord Pool response.
 
 ## Configuration
 
@@ -191,6 +191,10 @@ The monitor detected that controller script ID 1 is not running and forced every
 ### A virtual-component conflict is reported
 
 Another component already uses `group:250`, `number:250`, `number:251` or one of `text:250` through `text:252`. The scripts intentionally do not delete or overwrite it. Free those IDs or change all corresponding IDs in both `CONFIG` objects before installation.
+
+### The fetcher reports `Script ran out of memory` on Gen4
+
+Replace only script 3 with the latest `shelly-nordpool-se3-fetcher.js`, keep its auto-start disabled and start the controller. The current readable fetcher is kept below 8 kB and adaptively stores the smaller of cheap ON or expensive OFF selections to preserve Gen4 mJS headroom. Do not enable auto-start for the monitor or fetcher.
 
 ## Removal and rollback
 

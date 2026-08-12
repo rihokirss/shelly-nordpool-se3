@@ -159,6 +159,13 @@ function loadPlans(done) {
       if (requestError === 0 && requestResult) {
         try {
           var request = typeof requestResult.value === "string" ? JSON.parse(requestResult.value) : requestResult.value;
+          if (request && request.plan && planIsValid(request.plan)) {
+            replacePlan(request.plan);
+            savePlans();
+            log("Accepted fetched plan for " + dateText(request.plan.d));
+            Shelly.call("KVS.Delete", { key: CONFIG.requestKey }, function () { done(); });
+            return;
+          }
           if (request && request.retry && request.retry > Date.now()) state.lastTry = Date.now();
         } catch (error) {
           log("Ignored invalid fetch request");
